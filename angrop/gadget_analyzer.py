@@ -13,13 +13,14 @@ l = logging.getLogger("angrop.gadget_analyzer")
 
 
 class GadgetAnalyzer(object):
-    def __init__(self, project, reg_list, max_block_size, fast_mode, max_sym_mem_accesses):
+    def __init__(self, project, reg_list, max_block_size, fast_mode, max_sym_mem_accesses, allow_jop_gadgets=False):
         # params
         self.project = project
         self._reg_list = reg_list
         self._max_block_size = max_block_size
         self._fast_mode = fast_mode
         self._max_sym_mem_accesses = max_sym_mem_accesses
+        self._allow_jop_gadgets = allow_jop_gadgets
 
         # initial state that others are based off
         self._stack_length = 80
@@ -82,7 +83,7 @@ class GadgetAnalyzer(object):
                 l.debug("... uneven sp change")
                 return None
 
-            if this_gadget.stack_change <= 0:
+            if this_gadget.stack_change <= 0 and self._allow_jop_gadgets is False:
                 l.debug("stack change isn't positive")
                 return None
 
@@ -95,12 +96,20 @@ class GadgetAnalyzer(object):
                     l.debug("... too many symbolic memory accesses")
                     return None
 
+
             l.info("... checking for syscall availability")
             this_gadget.makes_syscall = self._does_syscall(symbolic_p)
             this_gadget.starts_with_syscall = self._starts_with_syscall(addr)
 
+            if self._allow_jop_gadgets is True:
+                l.info("... checking if gadget is jop")
+                self._check_is_jop_gadget(symbolic_state, this_gadget)
+
             l.info("... checking for controlled regs")
             self._check_reg_changes(symbolic_p, symbolic_state, this_gadget)
+
+            if this_gadget.is_jop:
+                self._check_jop_jump_dependencies(symbolic_p, this_gadget)
 
             # check for reg moves
             # get reg reads
@@ -116,6 +125,7 @@ class GadgetAnalyzer(object):
                 if len(m_access.addr_dependencies) == 0 and m_access.addr_constant is None:
                     l.debug("... mem access with no addr dependencies")
                     return None
+
 
         except RopException as e:
             l.debug("... %s", e)
@@ -307,7 +317,8 @@ class GadgetAnalyzer(object):
         :param symbolic_s: the symbolic state
         :return: True if the address of symbolic_p is controlled by the stack
         """
-        return self._check_if_stack_controls_ast(symbolic_p.ip, symbolic_s)
+        return self._check_if_stack_controls_ast(symbolic_p.ip, symbolic_s) is True or \
+                self._check_if_reg_controls_ast(symbolic_p.ip, symbolic_s) is True
 
     def _check_if_stack_controls_ast(self, ast, initial_state, gadget_stack_change=None):
         if gadget_stack_change is not None and gadget_stack_change <= 0:
@@ -348,6 +359,27 @@ class GadgetAnalyzer(object):
         # only store the result if we were using the whole stack
         if gadget_stack_change is not None:
             self._solve_cache[hash(ast)] = ans
+        return ans
+
+    def _check_if_reg_controls_ast(self, ast, initial_state):
+        """Checks if any register (or the register the value points to) will control the ast"""
+        # check solve cache?
+
+        sym_reg_state = initial_state.copy()
+        conc_val = sym_reg_state.solver.BVV(0x42, self.project.arch.bits)
+        dummy_addr = 0x1000
+        sym_reg_state.memory.store(dummy_addr, conc_val, self.project.arch.bytes)
+        # Check if check if ast is equal to the value in any of the registers or is equal to the vaue pointed to by that value
+        constraint_list = [(ast == getattr(sym_reg_state.regs, reg_name)) for reg_name in self._reg_list]
+        if self._allow_jop_gadgets is True:
+            constraint_list.append((ast == conc_val))
+        extra_constraints = claripy.Or(*constraint_list)
+        constraints = claripy.And(*[sym_reg_state.memory.load(getattr(sym_reg_state.regs, reg_name), self.project.arch.bits) == dummy_addr for reg_name in self._reg_list])
+        sym_reg_state.add_constraints(constraints)
+        sym_reg_state.add_constraints(extra_constraints)
+        ans = bool(sym_reg_state.solver.satisfiable() and rop_utils.fast_unconstrained_check(initial_state, ast))
+
+        # solve cache add?
         return ans
 
     def _compute_sp_change(self, symbolic_state, gadget):
@@ -647,5 +679,46 @@ class GadgetAnalyzer(object):
                 except RegNotFoundException as e:
                     l.debug(e)
         return all_reg_writes
+
+    def _check_is_jop_gadget(self, initial_state, this_gadget):
+
+        l.info('Checking if %s is a jop gadget' % hex(this_gadget.addr))
+
+        if this_gadget.makes_syscall:
+            this_gadget.is_jop = True
+            return
+
+        sym_state = initial_state.copy()
+        for reg_name in self._reg_list:
+            rop_utils.make_reg_symbolic(sym_state, reg_name)
+        rop_utils.make_reg_symbolic(sym_state, self._sp_reg)
+        path = rop_utils.step_to_unconstrained_successor(self.project, sym_state)
+        action = list(path.history.actions)[-2]
+        if action.type != action.MEM:
+            this_gadget.is_jop = False
+            return
+
+        if action.action != action.READ:
+            this_gadget.is_jop = False
+            return
+
+        ast_vars = action.addr.ast.variables
+        if len(ast_vars) < 1:
+            this_gadget.is_jop = False
+            return
+
+        if len([v for v in ast_vars if v.startswith('sreg_')]) < 1:
+            this_gadget.is_jop = False
+            return
+
+        this_gadget.is_jop = True
+
+    def _check_jop_jump_dependencies(self, symbolic_p, this_gadget):
+        if this_gadget.makes_syscall:
+            return
+
+        action = list(symbolic_p.history.actions)[-2]
+        this_gadget.jop_jump_dependencies = rop_utils.get_ast_dependency(action.addr)
+
 
 # TODO ip setters, ie call rax

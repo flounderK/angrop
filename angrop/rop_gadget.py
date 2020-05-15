@@ -67,6 +67,7 @@ class RopGadget(object):
         self.popped_regs = set()
         self.reg_dependencies = dict()  # like rax might depend on rbx, rcx
         self.reg_controllers = dict()  # like rax might be able to be controlled by rbx (for any value of rcx)
+        self.jop_jump_dependencies = set()
         self.stack_change = None
         self.mem_reads = []
         self.mem_writes = []
@@ -76,6 +77,7 @@ class RopGadget(object):
         self.block_length = None
         self.makes_syscall = False
         self.starts_with_syscall = False
+        self.is_jop = False
 
     def __str__(self):
         s = "Gadget %#x\n" % self.addr
@@ -154,6 +156,8 @@ class RopGadget(object):
         out.block_length = self.block_length
         out.makes_syscall = self.makes_syscall
         out.starts_with_syscall = self.starts_with_syscall
+        out.is_jop = self.is_jop
+        out.jop_jump_dependencies = set(self.jop_jump_dependencies)
         return out
 
 

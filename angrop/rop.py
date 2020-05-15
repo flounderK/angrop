@@ -45,7 +45,7 @@ class ROP(Analysis):
     Additionally, all public methods from ChainBuilder are copied into ROP.
     """
 
-    def __init__(self, only_check_near_rets=True, max_block_size=20, max_sym_mem_accesses=4, fast_mode=None):
+    def __init__(self, only_check_near_rets=True, max_block_size=20, max_sym_mem_accesses=4, fast_mode=None, allow_jop_gadgets=False):
         """
         Initializes the rop gadget finder
         :param only_check_near_rets: If true we skip blocks that are not near rets
@@ -70,6 +70,7 @@ class ROP(Analysis):
         self._reg_list = a.default_symbolic_registers
         # prune the register list of the instruction pointer and the stack pointer
         self._reg_list = [r for r in self._reg_list if r not in (self._sp_reg, self._ip_reg)]
+        self._allow_jop_gadgets = allow_jop_gadgets
 
         # get ret locations
         self._ret_locations = self._get_ret_locations()
@@ -103,7 +104,7 @@ class ROP(Analysis):
 
         # gadget analyzer
         self._gadget_analyzer = gadget_analyzer.GadgetAnalyzer(self.project, self._reg_list, self._max_block_size,
-                                                               self._fast_mode, self._max_sym_mem_accesses)
+                                                               self._fast_mode, self._max_sym_mem_accesses, self._allow_jop_gadgets)
         # chain builder
         self._chain_builder = None
 
